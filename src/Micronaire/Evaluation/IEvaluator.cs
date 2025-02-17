@@ -1,5 +1,7 @@
 ﻿// Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
+using Microsoft.SemanticKernel;
+
 namespace Micronaire;
 
 /// <summary>
@@ -16,6 +18,7 @@ public interface IEvaluator
     public Task<EvaluationReport> EvaluateAsync(
         IRagPipeline pipeline,
         string groundTruthPath,
+         IKernelBuilder kernelBuilder = null,
         CancellationToken cancellationToken = default
     );
 }

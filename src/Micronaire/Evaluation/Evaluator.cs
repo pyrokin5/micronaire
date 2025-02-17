@@ -21,18 +21,24 @@ namespace Micronaire;
 /// </summary>
 public class Evaluator : IEvaluator
 {
-    private readonly ILogger<Evaluator> _logger;
-    private readonly ILLMEvaluator _llmEvaluator;
-    private readonly IClaimExtractor _claimExtractor;
-    private readonly IConfiguration _configuration;
-    private readonly IOverallClaimEvaluator _overallClaimEvaluator;
-    private readonly IRetrievalClaimEvaluator _retrievalClaimEvaluator;
-    private readonly IGenerationClaimEvaluator _generationClaimEvaluator;
+    private readonly ILogger<Evaluator> logger;
+    private readonly ILLMEvaluator llmEvaluator;
+    private readonly IClaimExtractor claimExtractor;
+    private readonly IConfiguration configuration;
+    private readonly IOverallClaimEvaluator overallClaimEvaluator;
+    private readonly IRetrievalClaimEvaluator retrievalClaimEvaluator;
+    private readonly IGenerationClaimEvaluator generationClaimEvaluator;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="Evaluator"/> class.
     /// </summary>
-    /// <param name="configuration">Configuration to use.</param>
+    /// <param name="logger">Logging interface dependency. Used for logging information, warnings, and errors during the evaluation process.</param>
+    /// <param name="configuration">Configuration interface dependency. Provides access to configuration settings required for the evaluator.</param>
+    /// <param name="claimExtractor">Claim extractor interface dependency. Used for extracting claims from text chunks during the evaluation process.</param>
+    /// <param name="llmEvaluator">LLM evaluator interface dependency. Used for evaluating the generated answers against the ground truth using a language model.</param>
+    /// <param name="overallClaimEvaluator">Overall claim evaluator interface dependency. Used for evaluating the overall metrics based on claim analysis of the generated and ground truth answers.</param>
+    /// <param name="retrievalClaimEvaluator">Retrieval claim evaluator interface dependency. Used for evaluating the retrieval process using the context and ground truth claims.</param>
+    /// <param name="generationClaimEvaluator">Generation claim evaluator interface dependency. Used for evaluating the generation process using the context, generated, and ground truth claims.</param>
     public Evaluator(
         ILogger<Evaluator> logger,
         IConfiguration configuration,
@@ -40,97 +46,93 @@ public class Evaluator : IEvaluator
         ILLMEvaluator llmEvaluator,
         IOverallClaimEvaluator overallClaimEvaluator,
         IRetrievalClaimEvaluator retrievalClaimEvaluator,
-        IGenerationClaimEvaluator generationClaimEvaluator
-    )
+        IGenerationClaimEvaluator generationClaimEvaluator)
     {
-        _logger = logger;
-        _configuration = configuration;
-        _claimExtractor = claimExtractor;
-        _llmEvaluator = llmEvaluator;
-        _overallClaimEvaluator = overallClaimEvaluator;
-        _retrievalClaimEvaluator = retrievalClaimEvaluator;
-        _generationClaimEvaluator = generationClaimEvaluator;
+        this.logger = logger;
+        this.configuration = configuration;
+        this.claimExtractor = claimExtractor;
+        this.llmEvaluator = llmEvaluator;
+        this.overallClaimEvaluator = overallClaimEvaluator;
+        this.retrievalClaimEvaluator = retrievalClaimEvaluator;
+        this.generationClaimEvaluator = generationClaimEvaluator;
     }
 
     /// <inheritdoc/>
     public async Task<EvaluationReport> EvaluateAsync(
         IRagPipeline pipeline,
         string groundTruthPath,
-        CancellationToken cancellationToken = default
-    )
+        IKernelBuilder? kernelBuilder = null,
+        CancellationToken cancellationToken = default)
     {
         var questionReports = new List<QuestionReport>();
-        var evaluator = BuildEvaluator();
-        _logger.LogInformation("Loading ground truth from {path}", groundTruthPath);
-        foreach (
-            var (question, groundTruthAnswer) in GroundTruthLoader.LoadQADataSet(groundTruthPath)
-        )
+        Kernel evaluator;
+        if (kernelBuilder != null)
         {
-            _logger.LogInformation("Evaluating question: {question}", question);
+            evaluator = this.BuildLocalEvaluator(kernelBuilder);
+        }
+        else
+        {
+            evaluator = this.BuildEvaluator();
+        }
+
+        this.logger.LogInformation("Loading ground truth from {path}", groundTruthPath);
+        foreach (
+            var (question, groundTruthAnswer) in GroundTruthLoader.LoadQADataSet(groundTruthPath))
+        {
+            this.logger.LogInformation("Evaluating question: {question}", question);
             var (generatedAnswer, contexts) = await pipeline.GenerateAsync(
                 question,
-                cancellationToken
-            );
-            _logger.LogInformation("Generated answer: {generatedAnswer}", generatedAnswer);
+                cancellationToken);
+            this.logger.LogInformation("Generated answer: {generatedAnswer}", generatedAnswer);
 
-            _logger.LogInformation("Extracting claims for question: {question}", question);
+            this.logger.LogInformation("Extracting claims for question: {question}", question);
             var contextClaimsRaw = await Task.WhenAll(
                 contexts
                     .Select(c => c.Context)
                     .Select(async c =>
                         (
-                            await _claimExtractor.ExtractClaimsAsync(
+                            await this.claimExtractor.ExtractClaimsAsync(
                                 evaluator,
                                 c,
-                                cancellationToken
-                            )
-                        ).Where(c => !c.IsTriplet)
-                    )
-            );
+                                cancellationToken)).Where(c => !c.IsTriplet)));
             var contextClaims = contextClaimsRaw.SelectMany(c => c);
-            var groundTruthAnswerClaimsRaw = await _claimExtractor.ExtractClaimsAsync(
+            var groundTruthAnswerClaimsRaw = await this.claimExtractor.ExtractClaimsAsync(
                 evaluator,
                 groundTruthAnswer,
-                cancellationToken
-            );
+                cancellationToken);
             var groundTruthClaims = groundTruthAnswerClaimsRaw.Where(c => !c.IsTriplet);
-            var generatedClaimsRaw = await _claimExtractor.ExtractClaimsAsync(
+            var generatedClaimsRaw = await this.claimExtractor.ExtractClaimsAsync(
                 evaluator,
                 generatedAnswer,
-                cancellationToken
-            );
+                cancellationToken);
             var generatedClaims = generatedClaimsRaw.Where(c => !c.IsTriplet);
 
-            _logger.LogInformation("Generating reports for question {question}", question);
-            var llmReport = await _llmEvaluator.EvaluateAsync(
+            this.logger.LogInformation("Generating reports for question {question}", question);
+            var llmReport = await this.llmEvaluator.EvaluateAsync(
                 evaluator,
                 question,
                 string.Join('\n', contexts.Select(c => c.Context)),
                 generatedAnswer,
                 groundTruthAnswer,
-                cancellationToken
-            );
-            var overallClaimReport = await _overallClaimEvaluator.EvaluateAsync(
+                cancellationToken);
+            var overallClaimReport = await this.overallClaimEvaluator.EvaluateAsync(
                 evaluator,
                 generatedClaims,
                 groundTruthClaims,
-                cancellationToken
-            );
-            var retrievalClaimReport = await _retrievalClaimEvaluator.EvaluateAsync(
+                cancellationToken);
+            var retrievalClaimReport = await this.retrievalClaimEvaluator.EvaluateAsync(
                 evaluator,
                 groundTruthClaims,
                 contextClaims,
-                cancellationToken
-            );
+                cancellationToken);
             var generationClaimReport =
-                await _generationClaimEvaluator.EvaluateGeneratorMetricsAsync(
+                await this.generationClaimEvaluator.EvaluateGeneratorMetricsAsync(
                     evaluator,
                     contextClaims,
                     contextClaimsRaw,
                     generatedClaims,
                     groundTruthClaims,
-                    cancellationToken
-                );
+                    cancellationToken);
             questionReports.Add(
                 new QuestionReport()
                 {
@@ -139,14 +141,13 @@ public class Evaluator : IEvaluator
                     OverallClaimReport = overallClaimReport,
                     RetrievalClaimReport = retrievalClaimReport,
                     GenerationClaimReport = generationClaimReport,
-                }
-            );
+                });
         }
-        var evaluationReport = SummarizeQuestionReports(questionReports);
-        _logger.LogInformation(
+
+        var evaluationReport = this.SummarizeQuestionReports(questionReports);
+        this.logger.LogInformation(
             "EvaluationReport: {evaluationReport}",
-            JsonConvert.SerializeObject(evaluationReport, Formatting.Indented)
-        );
+            JsonConvert.SerializeObject(evaluationReport, Formatting.Indented));
         return evaluationReport;
     }
 
@@ -172,25 +173,20 @@ public class Evaluator : IEvaluator
         {
             ClaimRecall = questionReports.Average(q => q.RetrievalClaimReport.ClaimRecall),
             ContextPrecision = questionReports.Average(q =>
-                q.RetrievalClaimReport.ContextPrecision
-            ),
+                q.RetrievalClaimReport.ContextPrecision),
         };
         var averageGenerationClaimReport = new GenerationClaimReport()
         {
             Faithfulness = questionReports.Average(q => q.GenerationClaimReport.Faithfulness),
             RelevantNoiseSensitivity = questionReports.Average(q =>
-                q.GenerationClaimReport.RelevantNoiseSensitivity
-            ),
+                q.GenerationClaimReport.RelevantNoiseSensitivity),
             IrrelevantNoiseSensitivity = questionReports.Average(q =>
-                q.GenerationClaimReport.IrrelevantNoiseSensitivity
-            ),
+                q.GenerationClaimReport.IrrelevantNoiseSensitivity),
             Hallucination = questionReports.Average(q => q.GenerationClaimReport.Hallucination),
             SelfKnowledgeScore = questionReports.Average(q =>
-                q.GenerationClaimReport.SelfKnowledgeScore
-            ),
+                q.GenerationClaimReport.SelfKnowledgeScore),
             ContextUtilization = questionReports.Average(q =>
-                q.GenerationClaimReport.ContextUtilization
-            ),
+                q.GenerationClaimReport.ContextUtilization),
         };
 
         return new()
@@ -206,7 +202,7 @@ public class Evaluator : IEvaluator
     private Kernel BuildEvaluator()
     {
         var evaluatorKernelConfig =
-            _configuration
+            this.configuration
                 .GetRequiredSection(nameof(EvaluatorAzureOpenAIConfig))
                 .Get<EvaluatorAzureOpenAIConfig>()
             ?? throw new NullReferenceException($"Missing {nameof(EvaluatorAzureOpenAIConfig)}");
@@ -215,8 +211,7 @@ public class Evaluator : IEvaluator
             .AddAzureOpenAIChatCompletion(
                 evaluatorKernelConfig.ChatModelDeploymentName,
                 evaluatorKernelConfig.Endpoint,
-                evaluatorKernelConfig.ApiKey
-            );
+                evaluatorKernelConfig.ApiKey);
         evaluatorKernelBuilder.Services.ConfigureHttpClientDefaults(c =>
         {
             // Use a standard resiliency policy, augmented to retry on 401 Unauthorized for this example
@@ -228,8 +223,7 @@ public class Evaluator : IEvaluator
                         ValueTask.FromResult(
                             args.Outcome.Result?.StatusCode is HttpStatusCode.Unauthorized
                                 || args.Outcome.Result?.StatusCode is HttpStatusCode.TooManyRequests
-                                || args.Outcome.Exception?.InnerException is TaskCanceledException
-                        );
+                                || args.Outcome.Exception?.InnerException is TaskCanceledException);
                     o.Retry.MaxRetryAttempts = 2;
                     o.Retry.BackoffType = Polly.DelayBackoffType.Constant;
                     o.Retry.UseJitter = false;
@@ -242,17 +236,50 @@ public class Evaluator : IEvaluator
         kernel.ImportPluginFromPromptDirectory(
             Path.Combine(
                 AppDomain.CurrentDomain.BaseDirectory,
-                "..\\..\\..\\..\\Micronaire\\Claims\\ExtractorPlugins"
-            )
-        );
+                "..\\..\\..\\..\\Micronaire\\Claims\\ExtractorPlugins"));
 
         // add evaluation plugins to the kernel
         kernel.ImportPluginFromPromptDirectory(
             Path.Combine(
                 AppDomain.CurrentDomain.BaseDirectory,
-                "..\\..\\..\\..\\Micronaire\\LLMEvaluation\\Plugins"
-            )
-        );
+                "..\\..\\..\\..\\Micronaire\\LLMEvaluation\\Plugins"));
+        return kernel;
+    }
+
+    private Kernel BuildLocalEvaluator(IKernelBuilder evaluatorKernelBuilder)
+    {
+        evaluatorKernelBuilder.Services.ConfigureHttpClientDefaults(c =>
+        {
+            // Use a standard resiliency policy, augmented to retry on 401 Unauthorized for this example
+            c.AddStandardResilienceHandler()
+                .Configure(o =>
+                {
+                    o.TotalRequestTimeout.Timeout = TimeSpan.FromMinutes(2);
+                    o.Retry.ShouldHandle = args =>
+                        ValueTask.FromResult(
+                            args.Outcome.Result?.StatusCode is HttpStatusCode.Unauthorized
+                                || args.Outcome.Result?.StatusCode is HttpStatusCode.TooManyRequests
+                                || args.Outcome.Exception?.InnerException is TaskCanceledException);
+                    o.Retry.MaxRetryAttempts = 2;
+                    o.Retry.BackoffType = Polly.DelayBackoffType.Constant;
+                    o.Retry.UseJitter = false;
+                    o.Retry.Delay = TimeSpan.FromSeconds(40.0);
+                });
+        });
+        var kernel = evaluatorKernelBuilder.Build();
+
+        // add claim extraction plugin to the kernel
+        kernel.ImportPluginFromPromptDirectory(
+            Path.Combine(
+                AppDomain.CurrentDomain.BaseDirectory,
+                "..\\..\\..\\..\\Micronaire\\Claims\\ExtractorPlugins"));
+
+        // add evaluation plugins to the kernel
+        kernel.ImportPluginFromPromptDirectory(
+            Path.Combine(
+                AppDomain.CurrentDomain.BaseDirectory,
+                "..\\..\\..\\..\\Micronaire\\LLMEvaluation\\Plugins"));
+
         return kernel;
     }
 }
